@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>终极代理订阅转换器（全功能·纯前端·即时响应）</title>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <style>
+    :root { --primary: #2563eb; --success: #10b981; --danger: #ef4444; --warn: #f59e0b; --orange: #f97316; --gray: #64748b; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; background: #f8fafc; color: #1e293b; padding: 16px; }
+    .container { max-width: 960px; margin: auto; background: white; padding: 28px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
+    h1 { text-align: center; color: var(--primary); margin: 0 0 8px; font-size: 24px; }
+    p.subtitle { text-align: center; color: var(--gray); font-size: 14px; margin-bottom: 20px; }
+    label { display: block; margin: 16px 0 6px; font-weight: 600; color: #374151; }
+    textarea, input, select { width: 100%; padding: 12px; border: 1.5px solid #e2e8f0; border-radius: 8px; font-size: 14px; transition: border 0.2s; box-sizing: border-box; }
+    textarea:focus, input:focus, select:focus { outline: none; border-color: var(--primary); }
+    button { background: var(--primary); color: white; border: none; padding: 14px; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; width: 100%; margin: 12px 0; transition: 0.2s; }
+    button:hover { background: #1d4ed8; transform: translateY(-1px); }
+    button:disabled { background: #94a3b8; cursor: not-allowed; }
+    .checkbox { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: 14px; }
+    .log { margin-top: 20px; padding: 12px; background: #f1f5f9; border-radius: 8px; font-family: monospace; font-size: 13px; max-height: 180px; overflow-y: auto; border: 1px solid #e2e8f0; }
+    .result { margin-top: 20px; padding: 16px; background: #f0fdf4; border-radius: 8px; border: 1px solid #bbf7d0; }
+    .output { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 6px; font-family: monospace; font-size: 12px; max-height: 220px; overflow-y: auto; margin: 10px 0; }
+    .download { display: inline-block; background: var(--success); color: white; padding: 8px 16px; margin: 6px 6px 6px 0; border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: 500; }
+    .download:hover { background: #059669; }
+    .hidden { display: none; }
+    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; margin-left: 8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .status { text-align: center; margin: 10px 0; font-size: 14px; color: var(--gray); }
+    .import-btn { background: var(--orange); width: auto; display: inline-block; padding: 10px 20px; margin-top: 10px; }
+    .import-btn:hover { background: #ea580c; }
+    .btn-group { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+    .retry { color: var(--warn); font-weight: 600; }
+    .section { margin: 20px 0; padding: 16px; background: #f8fafc; border-radius: 12px; border: 1px solid #e2e8f0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>终极代理订阅转换器</h1>
+    <p class="subtitle">支持短链/跳转/失效检测/节点去重/乱码解码/自动重试 → 一键导入 Clash</p>
+
+    <label>订阅链接（多个用换行或逗号分隔）:</label>
+    <textarea id="urls" rows="6" placeholder="https://example.com/sub1&#10;https://t.co/abc123&#10;bit.ly/node"></textarea>
+
+    <label>输出格式:</label>
+    <select id="format">
+      <option value="clash">Clash (YAML)</option>
+      <option value="surge">Surge (.conf)</option>
+      <option value="singbox">Sing-box (JSON)</option>
+      <option value="qx">Quantumult X (.conf)</option>
+      <option value="loon">Loon (.conf)</option>
+    </select>
+
+    <label>排除关键词（节点名/加密方式）:</label>
+    <input type="text" id="exclude" value="2022-blake3-aes-128-gcm" placeholder="如: 广告, 2022-blake3-aes-128-gcm" />
+
+    <div class="checkbox">
+      <input type="checkbox" id="test" checked />
+      <label for="test">自动检测失效节点（4秒超时）</label>
+    </div>
+    <div class="checkbox">
+      <input type="checkbox" id="dedup" checked />
+      <label for="dedup">节点去重（推荐）</label>
+    </div>
+
+    <button id="main" onclick="startConvert()">
+      开始转换 <span id="spinner" class="spinner hidden"></span>
+    </button>
+
+    <div id="status" class="status hidden"></div>
+    <div id="log" class="log hidden"></div>
+
+    <div id="result" class="result hidden">
+      <div class="section">
+        <h3>有效订阅链接（已解析短链）</h3>
+        <div id="validUrls" class="output"></div>
+        <div class="btn-group">
+          <a id="downloadValid" class="download hidden">下载有效链接.txt</a>
+        </div>
+      </div>
+
+      <div class="section">
+        <h3>配置文件预览</h3>
+        <div id="configPreview" class="output"></div>
+        <div class="btn-group">
+          <a id="downloadConfig" class="download hidden">下载配置文件</a>
+          <a id="downloadZip" class="download hidden">下载 .zip 打包</a>
+          <button id="importClash" class="import-btn hidden" onclick="importToClash()">一键导入 Clash</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 日志
+    const log = (msg, type = 'info') => {
+      const el = document.getElementById('log');
+      el.classList.remove('hidden');
+      const color = type === 'error' ? '#ef4444' : type === 'success' ? '#10b981' : type === 'retry' ? '#f59e0b' : '#64748b';
+      el.innerHTML += `<span style="color:${color};">${msg}</span><br>`;
+      el.scrollTop = el.scrollHeight;
+    };
+
+    const setStatus = (msg) => {
+      const el = document.getElementById('status');
+      el.classList.remove('hidden');
+      el.textContent = msg;
+    };
+
+    // 解析短链（支持二次跳转）
+    const resolveUrl = async (url) => {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.url.includes('allorigins') ? url : res.url;
+      } catch (e) {
+        log(`短链解析失败: ${url}`, 'error');
+        return url;
+      }
+    };
+
+    // 排除节点
+    const isExcluded = (node) => {
+      const keywords = document.getElementById('exclude').value.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+      return keywords.some(k => node.toLowerCase().includes(k));
+    };
+
+    // 节点去重（server:port）
+    const deduplicate = (nodes) => {
+      const seen = new Set();
+      return nodes.filter(n => {
+        const key = `${n.server}:${n.port}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    };
+
+    // 测试节点（仅 ss/vmess）
+    const testNode = async (raw) => {
+      if (!document.getElementById('test').checked) return true;
+      try {
+        let proxy = '';
+        if (raw.startsWith('ss://')) {
+          const b64 = raw.split('://')[1].split('#')[0].split('?')[0];
+          const decoded = atob(b64);
+          const [_, addr] = decoded.split('@');
+          const [server, port] = addr.split(':');
+          proxy = `socks5://${server}:${port}`;
+        } else if (raw.startsWith('vmess://')) {
+          const d = JSON.parse(atob(raw.slice(8)));
+          proxy = `http://${d.add}:${d.port}`;
+        } else {
+          return true;
+        }
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), 4000);
+        await fetch('https://connectivitycheck.gstatic.com/generate_204', { signal: controller.signal, headers: { 'proxy': proxy } });
+        clearTimeout(id);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    // 服务器名字乱码解码（尝试多种方式）
+    const decodeName = (name) => {
+      if (!name) return name;
+      try { return decodeURIComponent(name); } catch {}
+      try {
+        const b64 = name.replace(/-/g, '+').replace(/_/g, '/');
+        const padded = b64 + '='.repeat((4 - b64.length % 4) % 4);
+        const decoded = atob(padded);
+        if (/[\u4e00-\u9fa5]/.test(decoded)) return decoded;
+      } catch {}
+      return name;
+    };
+
+    // 解析节点
+    const parseNode = (line) => {
+      try {
+        if (line.startsWith('vmess://')) {
+          const d = JSON.parse(atob(line.slice(8)));
+          d.ps = decodeName(d.ps);
+          return { type: 'vmess', name: d.ps || `VMess-${d.add}`, server: d.add, port: d.port, uuid: d.id, alterId: d.aid || 0, cipher: d.scy || 'auto', tls: d.tls === 'tls', network: d.net || 'ws', path: d.path || '/' };
+        }
+        if (line.startsWith('ss://') || line.startsWith('ssr://')) {
+          const isSSR = line.startsWith('ssr://');
+          const b64 = line.split('://')[1].split('#')[0];
+          const decoded = atob(b64);
+          const parts = decoded.split(/[:@?/]/);
+          if (isSSR || parts.length < 4) return null;
+          const [method, pwd, server, port] = parts;
+          const name = line.split('#')[1] ? decodeName(decodeURIComponent(line.split('#')[1])) : `SS-${server}`;
+          return { type: 'ss', name, server, port: parseInt(port), cipher: method, password: pwd };
+        }
+        if (line.startsWith('trojan://')) {
+          const u = new URL(line);
+          const name = u.hash ? decodeName(decodeURIComponent(u.hash.slice(1))) : `Trojan-${u.hostname}`;
+          return { type: 'trojan', name, server: u.hostname, port: u.port || 443, password: u.username };
+        }
+        if (line.startsWith('vless://')) {
+          const u = new URL(line);
+          const name = u.hash ? decodeName(decodeURIComponent(u.hash.slice(1))) : `VLESS-${u.hostname}`;
+          return { type: 'vless', name, server: u.hostname, port: u.port || 443, uuid: u.username };
+        }
+      } catch (e) {
+        log(`解析失败: ${line.slice(0,40)}...`, 'error');
+      }
+      return null;
+    };
+
+    // 生成 Clash 配置
+    const generateClash = (nodes) => {
+      const proxies = nodes.map(n => {
+        if (n.type === 'vmess') return `  - { name: "${n.name}", type: vmess, server: ${n.server}, port: ${n.port}, uuid: ${n.uuid}, alterId: ${n.alterId}, cipher: ${n.cipher}, tls: ${n.tls}, network: ${n.network}, "ws-opts": { path: "${n.path}" } }`;
+        if (n.type === 'ss') return `  - { name: "${n.name}", type: ss, server: ${n.server}, port: ${n.port}, cipher: ${n.cipher}, password: ${n.password} }`;
+        if (n.type === 'trojan') return `  - { name: "${n.name}", type: trojan, server: ${n.server}, port: ${n.port}, password: ${n.password}, sni: ${n.server}, skip-cert-verify: true }`;
+        if (n.type === 'vless') return `  - { name: "${n.name}", type: vless, server: ${n.server}, port: ${n.port}, uuid: ${n.uuid}, tls: true, network: tcp, skip-cert-verify: true }`;
+        return '';
+      }).filter(Boolean);
+      return `proxies:\n${proxies.join('\n')}\n\nproxy-groups:\n  - { name: 自动选择, type: select, proxies: [${nodes.map(n => `"${n.name}"`).join(', ')}] }`;
+    };
+
+    // 一键导入 Clash
+    const importToClash = () => {
+      const config = document.getElementById('configPreview').textContent;
+      const url = `clash://install-config?url=${encodeURIComponent('data:text/yaml;base64,' + btoa(unescape(encodeURIComponent(config))))}`;
+      window.location.href = url;
+    };
+
+    // 主函数（带重试机制）
+    const startConvert = async () => {
+      const btn = document.getElementById('main');
+      const spinner = document.getElementById('spinner');
+      const urlsInput = document.getElementById('urls').value.trim();
+      if (!urlsInput) return alert('请填写订阅链接');
+
+      btn.disabled = true;
+      spinner.classList.remove('hidden');
+      document.getElementById('result').classList.add('hidden');
+      document.getElementById('log').innerHTML = '';
+      setStatus('初始化...');
+      log('开始处理...');
+
+      const urlList = urlsInput.split(/\s+|,/).map(s => s.trim()).filter(Boolean);
+      const validUrls = [];
+      const rawNodes = [];
+
+      for (let i = 0; i < urlList.length; i++) {
+        const rawUrl = urlList[i];
+        setStatus(`处理 ${i+1}/${urlList.length}: ${rawUrl}`);
+        const finalUrl = await resolveUrl(rawUrl);
+        if (finalUrl !== rawUrl) log(`短链 → ${finalUrl}`);
+
+        let success = false;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), attempt === 1 ? 8000 : 15000);
+            const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(finalUrl)}`, { signal: controller.signal });
+            clearTimeout(timeout);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const text = await res.text();
+            const decoded = text.trim().length > 50 && !text.includes('\n') ? atob(text.trim()) : text;
+            const lines = decoded.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+            let added = 0;
+            for (const line of lines) {
+              if (!line.includes('://')) continue;
+              if (isExcluded(line)) { log(`排除: ${line.slice(0,40)}...`); continue; }
+              const node = parseNode(line);
+              if (node && await testNode(line)) {
+                rawNodes.push(node);
+                added++;
+              } else if (node) {
+                log(`失效: ${node.name}`);
+              }
+            }
+            if (added > 0) {
+              validUrls.push(finalUrl);
+              log(`成功: ${finalUrl} (+${added})`, 'success');
+            }
+            success = true;
+            break;
+          } catch (err) {
+            if (attempt === 1) {
+              log(`第1次失败: ${finalUrl} → ${err.message}，<span class="retry">1秒后重试...</span>`, 'retry');
+              await new Promise(r => setTimeout(r, 1000));
+            } else {
+              log(`最终失败: ${finalUrl} → ${err.message}`, 'error');
+            }
+          }
+        }
+        if (!success) log(`跳过: ${finalUrl}`, 'error');
+      }
+
+      if (rawNodes.length === 0) {
+        setStatus('无有效节点');
+        btn.disabled = false;
+        spinner.classList.add('hidden');
+        return;
+      }
+
+      let finalNodes = rawNodes;
+      if (document.getElementById('dedup').checked) {
+        const before = finalNodes.length;
+        finalNodes = deduplicate(finalNodes);
+        log(`去重: ${before} → ${finalNodes.length}`);
+      }
+
+      const format = document.getElementById('format').value;
+      const config = format === 'clash' ? generateClash(finalNodes) : JSON.stringify(finalNodes, null, 2);
+
+      document.getElementById('validUrls').textContent = validUrls.join('\n');
+      document.getElementById('configPreview').textContent = config;
+
+      // 下载
+      const blobValid = new Blob([validUrls.join('\n')], { type: 'text/plain' });
+      const blobConfig = new Blob([config], { type: 'text/plain' });
+      document.getElementById('downloadValid').href = URL.createObjectURL(blobValid);
+      document.getElementById('downloadValid').download = 'valid_urls.txt';
+      document.getElementById('downloadValid').classList.remove('hidden');
+
+      const ext = { clash: 'yaml', surge: 'conf', singbox: 'json', qx: 'conf', loon: 'conf' }[format] || 'txt';
+      document.getElementById('downloadConfig').href = URL.createObjectURL(blobConfig);
+      document.getElementById('downloadConfig').download = `config.${ext}`;
+      document.getElementById('downloadConfig').classList.remove('hidden');
+
+      // ZIP 打包
+      const zip = new JSZip();
+      zip.file('valid_urls.txt', validUrls.join('\n'));
+      zip.file(`config.${ext}`, config);
+      zip.generateAsync({ type: 'blob' }).then(blob => {
+        document.getElementById('downloadZip').href = URL.createObjectURL(blob);
+        document.getElementById('downloadZip').download = 'proxy-pack.zip';
+        document.getElementById('downloadZip').classList.remove('hidden');
+      });
+
+      // 一键导入 Clash
+      if (format === 'clash') {
+        document.getElementById('importClash').classList.remove('hidden');
+      }
+
+      document.getElementById('result').classList.remove('hidden');
+      setStatus(`完成！${finalNodes.length} 个节点`);
+      log(`转换完成！共 ${finalNodes.length} 个节点`, 'success');
+      btn.disabled = false;
+      spinner.classList.add('hidden');
+    };
+  </script>
+</body>
+</html>
