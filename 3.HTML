@@ -1,0 +1,786 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>多订阅/节点批量转换器（前端）</title>
+<!-- 外部库（CDN） -->
+<script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin: 12px; color:#111; }
+  textarea { width: 100%; min-height: 120px; font-family: monospace; }
+  input[type=text], select { width: 100%; padding:6px; }
+  .grid { display:grid; grid-template-columns: 1fr 380px; gap:12px; align-items:start; }
+  .card { padding:12px; border:1px solid #ddd; border-radius:8px; background:#fff;}
+  .small { font-size:12px; color:#666; }
+  button { padding:8px 12px; margin:6px 4px 0 0; cursor:pointer; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .bad { color:#b00; }
+  pre { white-space:pre-wrap; word-break:break-all; background:#f7f7f7; padding:8px; border-radius:6px; }
+</style>
+</head>
+<body>
+<h2>多订阅/节点批量转换器（前端）</h2>
+<p class="small">说明：可批量抓取订阅链接、解析节点、排重、排除含 <code>2022-blake3-aes-128-gcm</code> 的节点、转换为多种格式并打包下载。若远程订阅跨域失败，请先手动粘贴/上传订阅原文。</p>
+<div class="grid">
+  <div class="card">
+    <h3>1. 输入订阅链接 / 粘贴订阅内容</h3>
+    <label>订阅列表（每行一个 URL 或 base64/配置文本）：</label>
+    <textarea id="subsInput" placeholder="http://... 或 https://... 或 订阅内容/短链接/直接粘贴订阅 base64"></textarea>
+    <div class="row">
+      <label style="width:120px">超时(ms)：</label><input id="timeout" type="text" value="10000" />
+      <label style="width:120px">重试次数：</label><input id="retries" type="text" value="1" />
+    </div>
+    <div class="row">
+      <label style="width:120px">排除关键词（以逗号分隔）：</label><input id="excludeKeys" type="text" value="2022-blake3-aes-128-gcm" />
+    </div>
+    <div class="row">
+      <label style="width:120px">目标格式：</label>
+      <select id="targetFormat">
+        <option value="auto">自动判断客户端（Auto）</option>
+        <option value="clash">Clash (YAML)</option>
+        <option value="surge4">Surge 4</option>
+        <option value="surge5">Surge 5</option>
+        <option value="singbox">Sing-Box (JSON)</option>
+        <option value="v2ray">V2Ray (JSON)</option>
+        <option value="trojan_list">Trojan 列表</option>
+        <option value="ss_list">Shadowsocks SIP002 列表</option>
+        <option value="ssr_list">ShadowsocksR 列表</option>
+        <option value="mixed">Mixed (each node as original)</option>
+      </select>
+    </div>
+    <div style="margin-top:8px" class="row">
+      <button id="fetchBtn">开始抓取并解析</button>
+      <button id="parseLocalBtn">仅解析输入/粘贴内容</button>
+      <button id="uploadZipBtn">导出 ZIP 并下载</button>
+      <button id="downloadSingleBtn">导出 单一配置并下载</button>
+    </div>
+
+    <h3>选项</h3>
+    <div class="row">
+      <label><input type="checkbox" id="doDedup" checked /> 节点去重</label>
+      <label><input type="checkbox" id="skipInvalid" checked /> 跳过失效订阅</label>
+      <label><input type="checkbox" id="tryDecodeName" checked /> 尝试解码服务器名字（Base64 / URI / HTML）</label>
+    </div>
+
+    <h3>示例 / 帮助</h3>
+    <div class="small">
+      - 可粘贴：vmess://base64、ss://、ssr://、trojan://、vless://、Clash YAML 内容等<br>
+      - 当远程订阅跨域失败时，请粘贴订阅内容或上传文件（下面区域）。<br>
+      - 上传匿名网盘代码在 JS 中有预留接口（注释），你可替换成你要用的服务接口与 API Key。
+    </div>
+
+    <h3>上传订阅文件（可选）</h3>
+    <input id="fileInput" type="file" accept=".txt,.conf,.yaml,.yml,.json" />
+    <div class="small">支持直接上传订阅文本文件，或将包含多个订阅的 .txt 文件拖入。</div>
+  </div>
+
+  <div class="card">
+    <h3>2. 处理结果</h3>
+    <div class="row">
+      <strong>有效订阅 URL：</strong>
+      <button id="copyValidBtn">复制</button>
+    </div>
+    <pre id="validUrls" style="min-height:80px"></pre>
+
+    <h4>解析统计</h4>
+    <pre id="stats">-</pre>
+
+    <h4>解析出的节点（部分预览）</h4>
+    <pre id="nodesPreview" style="min-height:220px"></pre>
+
+    <h4>未解析 / 原始行（请手动检查）</h4>
+    <pre id="unparsed" style="min-height:120px"></pre>
+
+    <h4>操作与下载</h4>
+    <div class="row">
+      <button id="downloadYamlBtn">下载 Clash YAML</button>
+      <button id="downloadSurge4Btn">下载 Surge4</button>
+      <button id="downloadV2rayBtn">下载 V2Ray JSON</button>
+      <button id="downloadSingboxBtn">下载 Sing-Box</button>
+    </div>
+
+    <h4>上传与短链</h4>
+    <div class="small">生成的配置文件可：直接下载 / 打包 zip /（可选）上传到你配置的免注册网盘接口（需 CORS 支持）。</div>
+    <div class="row">
+      <button id="genBlobLinkBtn">生成本地下载链接</button>
+      <button id="uploadToHostBtn">上传到匿名网盘（预留接口）</button>
+    </div>
+    <pre id="downloadLinks" style="min-height:80px"></pre>
+  </div>
+</div>
+
+<script>
+/*
+  多订阅转换器 (前端)
+  主要步骤：
+  1. 从输入、文件或远程 URL 获取原始订阅文本
+  2. 对文本做基本分割 & 判定（base64 解码、url 解码）
+  3. 解析常见节点（vmess/vless/trojan/ss/ssr/ssr-like/clash lines）
+  4. 过滤（排除关键词、排除加密方式等）
+  5. 去重
+  6. 输出多种格式 & 打包下载
+*/
+
+const $ = id => document.getElementById(id);
+
+function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+
+function tryBase64Decode(s){
+  try{
+    // 允许 base64 urlsafe
+    s = s.trim();
+    // remove whitespace/newlines
+    s = s.replace(/\s+/g,'');
+    // pad
+    const pad = s.length % 4;
+    if(pad === 2) s += '==';
+    else if(pad === 3) s += '=';
+    // try atob
+    return decodeURIComponent(escape(atob(s)));
+  }catch(e){
+    try { return atob(s); } catch(e2) { return null; }
+  }
+}
+
+// 简单 URI 解码 + HTML实体
+function tryDecodeName(name){
+  if(!name) return name;
+  try{
+    let t = name;
+    // percent decode
+    try { t = decodeURIComponent(t); } catch(e){}
+    // base64?
+    const b = tryBase64Decode(t);
+    if(b) t = b;
+    // HTML entities basic
+    t = t.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
+    return t;
+  }catch(e){ return name; }
+}
+
+// fetch with timeout and retries
+async function fetchWithTimeout(url, timeout=10000, retries=1){
+  for(let i=0;i<=retries;i++){
+    try{
+      const controller = new AbortController();
+      const id = setTimeout(()=>controller.abort(), timeout);
+      const res = await fetch(url, {mode:'cors', signal:controller.signal});
+      clearTimeout(id);
+      return res;
+    }catch(e){
+      if(i === retries) throw e;
+      await sleep(600 + Math.random()*400);
+    }
+  }
+}
+
+// 判断是否可能是 base64 整个订阅
+function looksLikeBase64(s){
+  s = s.trim();
+  // if contains many '=' or only base64 chars:
+  return /^[A-Za-z0-9+/=\s]+$/.test(s) && (s.length % 4 === 0 || s.includes('==') || s.includes('=')); 
+}
+
+// 解析常见节点行，返回 {type, name, server, port, ...raw...}
+function parseNodeLine(line){
+  line = line.trim();
+  if(!line) return null;
+  // vmess://base64
+  if(line.startsWith('vmess://')){
+    const b = line.slice(8).trim();
+    const dec = tryBase64Decode(b) || b;
+    try {
+      const obj = JSON.parse(dec);
+      return { type:'vmess', name:tryDecodeName(obj.ps||obj.ps1||obj.name||obj.tag), server:obj.add||obj.ps, port:obj.port, uuid:obj.id||obj.uuid||obj.ps, raw:line, proto:'vmess', obj };
+    } catch(e){
+      return { type:'vmess', raw:line, undecoded:true };
+    }
+  }
+  // vless://user@host:port?params#name
+  if(line.startsWith('vless://')){
+    try{
+      const u = new URL(line);
+      return { type:'vless', name:tryDecodeName(u.hash?u.hash.slice(1):''), server:u.hostname, port:u.port||'443', user:u.username||u.username, raw:line, obj: {} };
+    }catch(e){}
+  }
+  // trojan://password@host:port?params#name
+  if(line.startsWith('trojan://')){
+    try{
+      const idx = line.indexOf('#');
+      const name = idx>0?tryDecodeName(decodeURIComponent(line.slice(idx+1))):'';
+      const u = new URL(line);
+      return { type:'trojan', name, server:u.hostname, port:u.port||'443', password:u.username, raw:line, obj:{} };
+    }catch(e){}
+  }
+  // ss://（SIP002） 支持 ss://base64#name 或 ss://method:pass@host:port#name
+  if(line.startsWith('ss://')){
+    const rest = line.slice(5);
+    // 形如 base64 或 method:password@host:port
+    if(rest.includes('@')){
+      // sip002
+      try{
+        const url = new URL(line.startsWith('ss://')?line.replace('ss://','ss://'):line);
+        // using URL may fail for ss scheme, fallback:
+      }catch(e){}
+      // fallback parse
+      let part = rest;
+      let name = '';
+      const sharp = rest.indexOf('#');
+      if(sharp>=0){ name = decodeURIComponent(rest.slice(sharp+1)); part = rest.slice(0,sharp); }
+      // part: method:pass@host:port
+      const beforeAt = part.split('@')[0];
+      const afterAt = part.split('@')[1];
+      if(afterAt){
+        const [hostport] = afterAt.split('');
+      }
+      // do simple split
+      try{
+        const [creds, hostport] = part.split('@');
+        const [method, password] = creds.split(':');
+        const [host, port] = hostport.split(':');
+        return { type:'ss', name:tryDecodeName(name||host), server:host, port:port||'8388', method, password, raw:line };
+      }catch(e){
+        // maybe base64 form
+      }
+    }else{
+      // base64 after ss://
+      const b64 = rest.split('#')[0];
+      const decoded = tryBase64Decode(b64);
+      if(decoded){
+        // decoded like method:pass@host:port
+        const sharp = rest.indexOf('#');
+        const name = sharp>0?decodeURIComponent(rest.slice(sharp+1)):'';
+        try{
+          const [creds, hostport] = decoded.split('@');
+          const [method, password] = creds.split(':');
+          const [host, port] = hostport.split(':');
+          return { type:'ss', name:tryDecodeName(name||host), server:host, port:port||'8388', method, password, raw:line };
+        }catch(e){
+          return { type:'ss', raw:line, undecoded:true };
+        }
+      }else{
+        return { type:'ss', raw:line, undecoded:true };
+      }
+    }
+  }
+
+  // ssr:// base64
+  if(line.startsWith('ssr://')){
+    const b = line.slice(6);
+    const dec = tryBase64Decode(b);
+    if(dec){
+      // format: host:port:protocol:method:obfs:base64(pass)/?params
+      const main = dec.split('/?')[0];
+      const params = dec.includes('/?') ? dec.split('/?')[1] : '';
+      const parts = main.split(':');
+      return { type:'ssr', server:parts[0], port:parts[1], protocol:parts[2], method:parts[3], obfs:parts[4], password: tryBase64Decode(parts[5]||''), params, raw:line };
+    }else{
+      return { type:'ssr', raw:line, undecoded:true };
+    }
+  }
+
+  // Clash YAML lines or plain node lines: try to catch "name: type: ..."
+  if(line.includes('vmess') || line.includes('trojan') || line.includes('shadowsocks') || line.includes('ssr')){
+    // try to parse as YAML if it looks like YAML
+    try{
+      const docs = jsyaml.loadAll(line);
+      if(docs && docs.length){
+        // return as raw yaml node
+        return { type:'yaml_node', raw:line, yaml:docs[0] };
+      }
+    }catch(e){}
+  }
+
+  // fallback: if line contains "://" try treat as raw url entry
+  if(line.includes('://')){
+    try{
+      const u = new URL(line);
+      return { type: u.protocol.replace(':',''), server:u.hostname, port:u.port, name:tryDecodeName(u.hash?u.hash.slice(1):''), raw:line };
+    }catch(e){}
+  }
+
+  return { type:'unknown', raw:line };
+}
+
+// 将解析得到的节点对象转换到目标格式（实现常见字段）
+function serializeNodes(nodes, format, opts={}){
+  // nodes: array of parsed node objects
+  if(format === 'clash'){
+    // basic Clash YAML structure
+    const proxies = nodes.map(n=>{
+      if(n.type === 'vmess' && n.obj){
+        return {
+          name: n.name || (n.obj.ps||n.server||'vmess'),
+          type: 'vmess',
+          server: n.obj.add||n.server,
+          port: Number(n.obj.port||n.port||0),
+          uuid: n.obj.id||n.obj.uuid,
+          alterId: Number(n.obj.aid||n.obj.alterId||0),
+          cipher: n.obj.cipher||'auto',
+          tls: (n.obj.tls === 'tls' || n.obj.tls === 'true' || n.obj.tls===true) || false,
+          network: n.obj.net||'tcp',
+          wsPath: n.obj.path||n.obj.ps||'',
+          wsHeaders: n.obj.host?{Host:n.obj.host}:undefined
+        };
+      }
+      if(n.type === 'trojan'){
+        return {
+          name: n.name || (n.server+':'+n.port),
+          type: 'trojan',
+          server: n.server,
+          port: Number(n.port||443),
+          password: n.password || n.user || '',
+          sni: ''
+        };
+      }
+      if(n.type === 'ss'){
+        return {
+          name: n.name || (n.server+':'+n.port),
+          type: 'ss',
+          server: n.server,
+          port: Number(n.port||8388),
+          cipher: n.method||'auto',
+          password: n.password||'',
+        };
+      }
+      if(n.type === 'ssr'){
+        return {
+          name: n.name || (n.server+':'+n.port),
+          type: 'ssr',
+          server: n.server,
+          port: Number(n.port||0),
+          cipher: n.method||'auto',
+          password: n.password||'',
+          protocol: n.protocol,
+          obfs: n.obfs,
+        }
+      }
+      // fallback: keep raw line as custom name
+      return { name: n.name||('node-'+Math.random().toString(36).slice(2,8)), type:'unknown', raw: n.raw };
+    });
+
+    const config = {
+      port: 7890,
+      'socks-port': 7891,
+      allow-lan: true,
+      mode: 'Rule',
+      proxies
+    };
+    return jsyaml.dump(config);
+  }
+
+  if(format === 'surge4' || format === 'surge5'){
+    // produce a basic Surge proxy group list
+    const lines = [];
+    lines.push('[Proxy]');
+    nodes.forEach(n=>{
+      if(n.type === 'trojan'){
+        lines.push(`${n.name || n.server}:${n.port} = trojan, ${n.server}, ${n.port}, password=${n.password||''}`);
+      }else if(n.type === 'ss'){
+        lines.push(`${n.name || n.server}:${n.port} = ss, ${n.server}, ${n.port}, encrypt-method=${n.method||'auto'}, password=${n.password||''}`);
+      }else if(n.type === 'vmess' && n.obj){
+        // surge vmess support limited; output as vmess line if possible
+        lines.push(`${n.name || n.server}:${n.port} = vmess, ${n.obj.add||n.server}, ${n.obj.port||n.port}, username=${n.obj.id||n.obj.uuid||''}, tls=${n.obj.tls||false}`);
+      }else{
+        lines.push(`# unsupported:${n.raw}`);
+      }
+    });
+    return lines.join('\n');
+  }
+
+  if(format === 'v2ray'){
+    // create minimal V2Ray-compatible JSON in "outbound" list
+    const outbounds = nodes.map(n=>{
+      if(n.type === 'vmess' && n.obj){
+        return {
+          protocol: 'vmess',
+          settings: { vnext: [{ address: n.obj.add, port: Number(n.obj.port), users: [{ id: n.obj.id||n.obj.uuid, alterId: Number(n.obj.aid||0), security: n.obj.aes||'auto' }] }]},
+          streamSettings: { network: n.obj.net||'tcp', wsSettings: n.obj.path?{path:n.obj.path, headers:{Host:n.obj.host||''}}:undefined }
+        };
+      }
+      if(n.type === 'vless'){
+        return {
+          protocol: 'vless',
+          settings: { vnext: [{ address: n.server, port: Number(n.port), users: [{ id: n.user||'', flow:'' }]}]},
+          streamSettings: {}
+        };
+      }
+      if(n.type === 'trojan'){
+        return {
+          protocol: 'trojan',
+          settings: { servers: [{ address: n.server, port: Number(n.port), password: n.password }]},
+          streamSettings: {}
+        };
+      }
+      return { protocol:'freedom', settings:{} };
+    });
+    return JSON.stringify({ outbounds }, null, 2);
+  }
+
+  if(format === 'singbox'){
+    // sing-box expects JSON nodes; we output simplified list under "proxies"
+    const proxies = nodes.map(n=>{
+      if(n.type === 'vmess' && n.obj){
+        return { name: n.name, type:'vmess', server: n.obj.add, port: Number(n.obj.port), uuid: n.obj.id };
+      }
+      if(n.type === 'trojan'){
+        return { name: n.name, type:'trojan', server: n.server, port: Number(n.port), password: n.password };
+      }
+      if(n.type === 'ss'){
+        return { name: n.name, type:'shadowsocks', server: n.server, port: Number(n.port), method:n.method, password:n.password };
+      }
+      return { name: n.name||'raw', type:'raw', raw: n.raw };
+    });
+    return JSON.stringify({ proxies }, null, 2);
+  }
+
+  if(format === 'trojan_list'){
+    return nodes.filter(n=>n.type==='trojan').map(n=>n.raw || (`trojan://${n.password||''}@${n.server}:${n.port}#${encodeURIComponent(n.name||'')}`)).join('\n');
+  }
+
+  if(format === 'ss_list'){
+    return nodes.filter(n=>n.type==='ss').map(n=>{
+      // sip002 form ss://base64#name
+      const cred = `${n.method}:${n.password}`;
+      const hostport = `${n.server}:${n.port}`;
+      const full = cred + '@' + hostport;
+      const b = btoa(unescape(encodeURIComponent(full)));
+      return `ss://${b}#${encodeURIComponent(n.name||n.server)}`;
+    }).join('\n');
+  }
+
+  if(format === 'ssr_list'){
+    return nodes.filter(n=>n.type==='ssr').map(n=>n.raw).join('\n');
+  }
+
+  if(format === 'mixed'){
+    return nodes.map(n=>n.raw || JSON.stringify(n)).join('\n');
+  }
+
+  // auto: pick Clash if many nodes, else mixed
+  if(format === 'auto'){
+    return serializeNodes(nodes, 'clash', opts);
+  }
+
+  // default fallback
+  return nodes.map(n => n.raw || JSON.stringify(n)).join('\n');
+}
+
+// 唯一性 key（用于去重）
+function nodeKey(n){
+  const t = n.type || 'unknown';
+  const s = n.server||'';
+  const p = n.port||'';
+  const id = n.uuid||n.password||n.id||n.user||'';
+  const name = n.name||'';
+  return `${t}||${s}||${p}||${id}||${name}`;
+}
+
+// 主流程
+async function processAllInputs({fromFetch=false}){
+  const rawText = $('subsInput').value || '';
+  const timeout = parseInt($('timeout').value||'10000');
+  const retries = parseInt($('retries').value||'1');
+  const excludeKeys = ($('excludeKeys').value || '').split(',').map(s=>s.trim()).filter(Boolean);
+  const doDedup = $('doDedup').checked;
+  const skipInvalid = $('skipInvalid').checked;
+  const tryDecodeNameFlag = $('tryDecodeName').checked;
+
+  // gather URLs/lines from rawText
+  const lines = rawText.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  // plus file input done separately
+  // For each line that looks like http(s) treat as URL to fetch
+  const urlLines = lines.filter(l=>/^https?:\/\//i.test(l));
+  const localContents = lines.filter(l=>!/^https?:\/\//i.test(l));
+
+  const validUrls = [];
+  const allNodeObjects = [];
+  const unparsed = [];
+  const validUrlSet = new Set();
+
+  // fetch each URL (if fromFetch true)
+  for(const u of urlLines){
+    try{
+      const res = await fetchWithTimeout(u, timeout, retries);
+      if(!res) { if(skipInvalid) continue; }
+      if(!res.ok){
+        // skip, but try one retry with longer timeout if allowed
+        if(skipInvalid) continue;
+      }
+      const text = await res.text();
+      if(text && text.trim()){
+        validUrls.push(u);
+        validUrlSet.add(u);
+        // split into possible nodes lines
+        parseSubscribeText(text, allNodeObjects, unparsed, excludeKeys, tryDecodeNameFlag);
+      }else{
+        // empty body
+      }
+    }catch(e){
+      // try deferred extended attempt once
+      try{
+        const res2 = await fetchWithTimeout(u, timeout*2, 0);
+        if(res2 && res2.ok){
+          const text = await res2.text();
+          if(text && text.trim()){
+            validUrls.push(u);
+            validUrlSet.add(u);
+            parseSubscribeText(text, allNodeObjects, unparsed, excludeKeys, tryDecodeNameFlag);
+            continue;
+          }
+        }
+      }catch(e2){}
+      // skip
+    }
+  }
+
+  // parse local content lines / base64 blocks
+  for(const l of localContents){
+    // if looks like base64 whole block, decode it first
+    if(looksLikeBase64(l) && l.length > 40 && !/^https?:\/\//i.test(l)){
+      const dec = tryBase64Decode(l);
+      if(dec && dec.includes('vmess://') || dec.includes('ss://') || dec.includes('ssr://') || dec.includes('trojan://') || dec.includes('vless://') ){
+        parseSubscribeText(dec, allNodeObjects, unparsed, excludeKeys, tryDecodeNameFlag);
+        continue;
+      }
+    }
+    // treat as text with multiple lines
+    parseSubscribeText(l, allNodeObjects, unparsed, excludeKeys, tryDecodeNameFlag);
+  }
+
+  // node dedup
+  let finalNodes = allNodeObjects.filter(Boolean);
+  if(doDedup){
+    const seen = new Set();
+    finalNodes = finalNodes.filter(n=>{
+      const k = nodeKey(n);
+      if(seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }
+
+  // update UI
+  $('validUrls').textContent = Array.from(validUrlSet).join('\n') || '(无)';
+  $('nodesPreview').textContent = finalNodes.slice(0, 200).map(n=>JSON.stringify(n)).join('\n\n');
+  $('unparsed').textContent = unparsed.slice(0,200).join('\n\n');
+  $('stats').textContent = `订阅输入数: ${lines.length}\n已抓取有效订阅: ${validUrlSet.size}\n解析到节点数: ${finalNodes.length}\n未解析条目: ${unparsed.length}`;
+  // store for downloads
+  window.__converter = window.__converter || {};
+  window.__converter.nodes = finalNodes;
+  window.__converter.validUrls = Array.from(validUrlSet);
+  return {nodes: finalNodes, validUrls:Array.from(validUrlSet), unparsed};
+}
+
+// 解析订阅文本，填充 nodes & unparsed
+function parseSubscribeText(text, nodesArr, unparsedArr, excludeKeys, tryDecodeNameFlag){
+  // some subscriptions are all base64 of multiple vmess lines
+  // split by newline and by base64 "vmess://" pieces
+  // replace CRLF with LF
+  text = text.replace(/\r/g,'');
+  // if the whole text seems base64, try decode then re-run
+  if(looksLikeBase64(text) && text.length>64 && !text.includes('\n')){
+    const dec = tryBase64Decode(text);
+    if(dec) text = dec;
+  }
+
+  // Many providers supply single-line base64 that expands to many "vmess://" entries:
+  // find all vmess://, ss://, ssr://, trojan:// occurrences
+  const urlMatches = [...text.matchAll(/(vmess:\/\/[A-Za-z0-9=\/+_-]+)/g)];
+  if(urlMatches.length){
+    urlMatches.forEach(m=>{
+      const parsed = parseNodeLine(m[0]);
+      if(parsed){
+        if(!nodeContainsExcluded(parsed, excludeKeys)){
+          if(tryDecodeNameFlag && parsed.name) parsed.name = tryDecodeName(parsed.name);
+          nodesArr.push(parsed);
+        }
+      }
+    });
+    return;
+  }
+
+  // else split lines and parse each
+  const lines = text.split('\n').map(s=>s.trim()).filter(Boolean);
+  for(const l of lines){
+    const parsed = parseNodeLine(l);
+    if(parsed && parsed.type !== 'unknown' && parsed.type !== 'yaml_node'){
+      if(!nodeContainsExcluded(parsed, excludeKeys)){
+        if(tryDecodeNameFlag && parsed.name) parsed.name = tryDecodeName(parsed.name);
+        nodesArr.push(parsed);
+      }
+    } else if(parsed && parsed.type === 'yaml_node'){
+      // try to extract known fields from yaml
+      const y = parsed.yaml;
+      if(y && y.type){
+        const obj = { type: y.type, name: tryDecodeName(y.name||y.alias||y.ps), server: y.server||y.hostname||y.host, port: y.port||y.server_port, raw: l, yaml: y};
+        if(!nodeContainsExcluded(obj, excludeKeys)){
+          nodesArr.push(obj);
+        }
+      } else {
+        // unknown yaml node, store raw
+        unparsedArr.push(l);
+      }
+    } else {
+      // maybe line is base64 of a single url
+      const dec = tryBase64Decode(l);
+      if(dec && dec !== l){
+        parseSubscribeText(dec, nodesArr, unparsedArr, excludeKeys, tryDecodeNameFlag);
+      } else {
+        // treat as raw fallback
+        unparsedArr.push(l);
+      }
+    }
+  }
+}
+
+// 检查 node 是否包含被排除的关键词（如加密方式）
+function nodeContainsExcluded(n, excludeKeys){
+  if(!excludeKeys || excludeKeys.length===0) return false;
+  const hay = JSON.stringify(n).toLowerCase();
+  for(const k of excludeKeys){
+    if(!k) continue;
+    if(hay.includes(k.toLowerCase())) return true;
+  }
+  return false;
+}
+
+/* UI 事件绑定 */
+$('fetchBtn').addEventListener('click', async ()=>{
+  $('fetchBtn').disabled = true;
+  try{
+    await processAllInputs({fromFetch:true});
+  }catch(e){
+    alert('抓取发生错误（可能是 CORS / 网络错误）：' + (e.message||e));
+  }finally{ $('fetchBtn').disabled = false; }
+});
+
+$('parseLocalBtn').addEventListener('click', async ()=>{
+  $('parseLocalBtn').disabled = true;
+  try{
+    await processAllInputs({fromFetch:false});
+  }catch(e){
+    alert('解析失败：' + (e.message||e));
+  }finally{ $('parseLocalBtn').disabled = false; }
+});
+
+$('fileInput').addEventListener('change', async (ev)=>{
+  const f = ev.target.files[0];
+  if(!f) return;
+  const txt = await f.text();
+  // append to textarea
+  $('subsInput').value = ($('subsInput').value + '\n' + txt).trim();
+  alert('文件已追加到输入区，点击「仅解析输入/粘贴内容」或「开始抓取并解析」进行处理。');
+});
+
+$('copyValidBtn').addEventListener('click', ()=>{
+  const t = $('validUrls').textContent;
+  navigator.clipboard?.writeText(t);
+  alert('已复制有效订阅 URL 到剪贴板');
+});
+
+// 下载函数
+function downloadText(filename, text){
+  const blob = new Blob([text], {type:'text/plain;charset=utf-8'});
+  saveAs(blob, filename);
+}
+
+// 单文件导出（根据 targetFormat）
+$('downloadSingleBtn').addEventListener('click', async ()=>{
+  const fmt = $('targetFormat').value;
+  await processAllInputs({fromFetch:false});
+  const nodes = (window.__converter && window.__converter.nodes) || [];
+  const data = serializeNodes(nodes, fmt === 'auto' ? 'auto' : fmt);
+  const ext = fmt === 'clash' ? 'yaml' : fmt==='v2ray' ? 'json' : 'txt';
+  downloadText(`converted.${ext}`, data);
+});
+
+$('uploadZipBtn').addEventListener('click', async ()=>{
+  // produce various formats and pack into zip
+  await processAllInputs({fromFetch:false});
+  const nodes = (window.__converter && window.__converter.nodes) || [];
+  if(!nodes.length){ alert('没有节点可导出'); return; }
+  const zip = new JSZip();
+  const formats = ['clash','surge4','surge5','v2ray','singbox','trojan_list','ss_list','ssr_list','mixed'];
+  formats.forEach(f=>{
+    try{
+      const content = serializeNodes(nodes, f);
+      const fname = `converted.${f === 'clash' ? 'yaml' : f==='v2ray' ? 'json' : (f+'_txt')}.txt`;
+      zip.file(fname, content);
+    }catch(e){
+      zip.file('error-'+f+'.txt','serialize error');
+    }
+  });
+  const blob = await zip.generateAsync({type:'blob'});
+  saveAs(blob, `converted_nodes_${Date.now()}.zip`);
+});
+
+// 快捷下载按钮
+$('downloadYamlBtn').addEventListener('click', async ()=>{
+  await processAllInputs({fromFetch:false});
+  const nodes = (window.__converter && window.__converter.nodes) || [];
+  const data = serializeNodes(nodes,'clash');
+  downloadText('clash.yaml', data);
+});
+$('downloadSurge4Btn').addEventListener('click', async ()=>{
+  await processAllInputs({fromFetch:false});
+  const nodes = (window.__converter && window.__converter.nodes) || [];
+  const data = serializeNodes(nodes,'surge4');
+  downloadText('surge4.conf', data);
+});
+$('downloadV2rayBtn').addEventListener('click', async ()=>{
+  await processAllInputs({fromFetch:false});
+  const nodes = (window.__converter && window.__converter.nodes) || [];
+  const data = serializeNodes(nodes,'v2ray');
+  downloadText('v2ray.json', data);
+});
+$('downloadSingboxBtn').addEventListener('click', async ()=>{
+  await processAllInputs({fromFetch:false});
+  const nodes = (window.__converter && window.__converter.nodes) || [];
+  const data = serializeNodes(nodes,'singbox');
+  downloadText('singbox.json', data);
+});
+
+$('genBlobLinkBtn').addEventListener('click', async ()=>{
+  await processAllInputs({fromFetch:false});
+  const nodes = (window.__converter && window.__converter.nodes) || [];
+  const fmt = $('targetFormat').value || 'auto';
+  const data = serializeNodes(nodes, fmt==='auto'?'auto':fmt);
+  const blob = new Blob([data], {type:'text/plain;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  $('downloadLinks').textContent = `本地 Blob 下载链接（临时）:\n${url}\n\n提示：刷新页面后该链接失效，可点击下载保存。`;
+});
+
+$('uploadToHostBtn').addEventListener('click', async ()=>{
+  // 这里演示如何把生成的文件上传到你配置的匿名上传 API。
+  // 注意：实际是否成功取决于目标接口是否允许 CORS 与所需的参数。
+  await processAllInputs({fromFetch:false});
+  const nodes = (window.__converter && window.__converter.nodes) || [];
+  if(!nodes || !nodes.length){ alert('没有节点可上传'); return; }
+  const fmt = $('targetFormat').value || 'auto';
+  const data = serializeNodes(nodes, fmt==='auto'?'auto':fmt);
+  // 默认仅在页面上生成 blob url / 下载，真正上传需要你填写下面 uploadToAnonymousHost 函数
+  try{
+    const resp = await uploadToAnonymousHost(data, `converted_${Date.now()}.txt`);
+    $('downloadLinks').textContent = '上传返回：\n' + JSON.stringify(resp, null, 2);
+  }catch(e){
+    alert('上传失败（接口或 CORS 限制），请使用本地下载或配置你的上传接口。错误：'+(e.message||e));
+  }
+});
+
+// 上传函数示例（需要你替换为实际可用的匿名上传服务）
+// 注意：很多匿名上传服务在浏览器直接调用会因 CORS 被拒绝。
+// 你可以在这里替换为你自己的实现（支持 CORS 的上传 endpoint）
+async function uploadToAnonymousHost(content, filename){
+  // 示例：如果你有自己的文件上传 API，改写这里即可。
+  // 下面是个占位实现：直接返回本地 Blob URL（不是真正上传）
+  const blob = new Blob([content], {type:'text/plain;charset=utf-8'});
+  return { localBlobUrl: URL.createObjectURL(blob), message: '本函数为占位，请替换为实际上传接口' };
+}
+
+</script>
+</body>
+</html>
